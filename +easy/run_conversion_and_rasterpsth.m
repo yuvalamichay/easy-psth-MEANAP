@@ -1,27 +1,66 @@
 % run_conversion_and_rasterpsth.m
-% Master script for conversion + RasterPSTH plotting
 
 % --- USER PARAMETERS: CONVERSION ---
+
+% Path to the .mat file containing spike times or spike matrix.
 spikeFile = 'OWT220207_1I_DIV63_HUB63_6UA_spikes.mat';
+
+% Path to the .mat file containing the raw electrophysiological data.
 rawFile   = 'OWT220207_1I_DIV63_HUB63_6UA.mat';
+
+% Time window (in milliseconds) after each stimulus during which detected spikes are considered artifacts and will be removed.
 artifact_window_ms = [0, 2];
+
+% Sampling frequency (Hz) of the recording.
 fs = 25000;
+
+% Name of the spike detection method (should match the field name in the loaded spike data).
 spikeMethod = 'bior1p5';
+
+% Total number of channels in the recording. Used to allocate arrays and loop over channels.
 numChannels = 60;
+
+% Index of the channel to extract spike times from and analyze (1-based index).
 channelToExtract = 5;
 
 % --- USER PARAMETERS: RasterPSTH ---
-rasterpsth_params.window = [-1 1];
-rasterpsth_params.psthBinWidth = 0.001;
-rasterpsth_params.psthSmoothWidth = 0.05;
-rasterpsth_params.kilosortTemplate = []; % optionally provide kilosort template
-rasterpsth_params.titleText = 'Example Raster/PSTH';
-rasterpsth_params.splitBy = [];
-rasterpsth_params.sortBy = [];
-rasterpsth_params.splitByColours = [];
-rasterpsth_params.ylim = [];
-rasterpsth_params.saveFigure = ''; % e.g., 'output/myplot.pdf'
 
+% Time window (in seconds) around each event (stimulus) to display in the raster/PSTH.
+rasterpsth_params.window = [-1 1];
+
+% Bin width (in seconds) for the PSTH histogram. 
+rasterpsth_params.psthBinWidth = 0.001;
+
+% Standard deviation (in seconds) of the Gaussian smoothing kernel applied to the PSTH.
+% Use 0 for no smoothing.
+rasterpsth_params.psthSmoothWidth = 0.05;
+
+% (Optional) Provide a Kilosort template to use for spike sorting visualization.
+% Leave empty if not using Kilosort output.
+rasterpsth_params.kilosortTemplate = [];
+
+% Title text for the raster/PSTH plot.
+rasterpsth_params.titleText = 'Raster/PSTH';
+
+% (Optional) Vector or cell array to split trials into groups (e.g., by stimulus type).
+% Leave empty if not splitting.
+rasterpsth_params.splitBy = [];
+
+% (Optional) Field to sort trials by (e.g., reaction time).
+% Leave empty for no sorting.
+rasterpsth_params.sortBy = [];
+
+% (Optional) Custom colors for different split groups.
+% Leave empty for default colors.
+rasterpsth_params.splitByColours = [];
+
+% (Optional) Set y-axis limits for the plot.
+% Leave empty for automatic scaling.
+rasterpsth_params.ylim = [];
+
+% (Optional) Path to save the generated figure (e.g., 'output/myplot.pdf').
+% Leave empty to not save automatically.
+rasterpsth_params.saveFigure = '';
 %% --- CONVERSION SECTION (from extracting/conversion_script.m) ---
 S = load(spikeFile);
 if isfield(S, 'spikeTimes')
@@ -111,7 +150,7 @@ save(spikeFile, 'spikeTimes', 'eventTimes', '-append');
 fprintf('Saved spikeTimes & eventTimes for channel %d.\n', channelToExtract);
 
 %% --- CALL RasterPSTH ---
-% Set up events cell array: label + eventTimes (see RasterPSTH doc)
+% Set up events cell array: label + eventTimes
 events = {'stim', eventTimes};
 
 % Build Name,Value argument pairs dynamically from rasterpsth_params struct
@@ -123,5 +162,3 @@ end
 
 % Call RasterPSTH
 grammObject = easy.RasterPSTH(spikeTimes, events, param_cell{:});
-
-% If desired, you can manipulate the grammObject here
