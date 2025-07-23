@@ -1,0 +1,206 @@
+clear; clc;
+
+%% --- USER PARAMETERS ---
+% Input files
+spikeFile = 'OWT220207_1I_DIV63_HUB63_6UA_Cspikes_L0_RP2.mat_Nortefact.mat';
+rawFile   = 'OWT220207_1I_DIV63_HUB63_6UA.mat';
+
+% Recording parameters
+artifact_window_ms = [0, 2]; % window around stim (in ms) to use for artifact removal
+fs = 25000; % sample rate (Hz)
+spikeMethod = 'bior1p5'; % adjust as needed
+numChannels = 60; % adjust as needed
+
+% PSTH parameters
+saveDir = 'PSTHs'; % directory where figures per channel will be saved
+window = [-0.2 0.8]; % time window around stimulation events in seconds (pre and post)
+psthBinWidth = 0.005; % bin width
+psthSmoothWidth = 0.025; % smoothing width
+titleText = 'Electrode Stimulation PSTH'; % Title for plots
+
+% --- ENABLE OR DISABLE SPIKE FREQUENCY REMOVAL ---
+DO_SPIKE_FREQ_REMOVAL = true; % <-- set to false to skip spike frequency filtering
+
+%% Create save directory if it doesn't exist
+if ~exist(saveDir, 'dir')
+    mkdir(saveDir);
+end
+
+%% --- CONVERT SPIKE TIMES ---
+  % either maintains spikeTimes as per MEA-NAP output or converts Mona's 'spikes' data structure 
+fprintf('Loading and converting spike data...\n');
+S = load(spikeFile);
+if isfield(S, 'spikeTimes')
+    spikeTimesConverted = S.spikeTimes;
+elseif isfield(S, 'spikes')
+    disp('Converting ''spikes'' matrix to ''spiketimesconverted'' struct format...');
+    [row, col] = find(S.spikes);
+    spikeTimesConverted = cell(1, numChannels);
+    for ch = 1:numChannels
+        spike_samples = row(col == ch);
+        spike_sec = spike_samples / fs;
+        spikeTimesConverted{ch} = struct(spikeMethod, spike_sec);
+    end
+else
+    error('Neither ''spikeTimes'' nor ''spikes'' found in file.');
+end
+
+%% --- ESTIMATE STIM TIMES ---
+fprintf('Estimating stimulation times from raw data...\n');
+R = load(rawFile);
+if isfield(R, 'dat')
+    dat = double(R.dat);
+else
+    error('Raw data variable "dat" not found in %s', rawFile);
+end
+
+[num_samples, ~] = size(dat);
+recording_length_sec = num_samples / fs;
+
+stimThreshold = -1000; % adjust as needed, currently AbsPos threshold
+flat_window_ms = 1.5; % minimum length of flat segment
+flat_thresh = 0.05;
+min_interval_ms = 2500;
+flat_search_window_ms = 100; 
+flat_window_samples = round(flat_window_ms * fs / 1000);
+flat_search_samples = round(flat_search_window_ms * fs / 1000);
+
+stim_times_sec = [];
+for channel_idx = 1:numChannels
+    trace = dat(:, channel_idx);
+    idx = find(trace > stimThreshold);
+    if isempty(idx), continue, end
+    idx = idx(:);
+    keep = [true; diff(idx) > round(0.010 * fs)];
+    idx = idx(keep);
+    for i = 1:length(idx)
+        center_idx = idx(i);
+        win_start = max(1, center_idx - flat_search_samples);
+        win_end = min(num_samples, center_idx + flat_search_samples);
+        win_trace = trace(win_start:win_end);
+        abs_diff = [0; abs(diff(win_trace))];
+        mov_abs_diff = movmean(abs_diff, flat_window_samples);
+        flat_idx = find(mov_abs_diff < flat_thresh);
+        if ~isempty(flat_idx)
+            flat_onsets = flat_idx([true; diff(flat_idx) > 1]);
+            flat_onsets_adj = flat_onsets - floor(flat_window_samples/2);
+            flat_onsets_adj(flat_onsets_adj < 1) = 1;
+            if ~isempty(flat_onsets_adj)
+                keep_idx = [true; diff(flat_onsets_adj) > round(min_interval_ms * fs / 1000)];
+                flat_onsets_adj = flat_onsets_adj(keep_idx);
+            end
+            for j = 1:length(flat_onsets_adj)
+                stim_idx = win_start - 1 + flat_onsets_adj(j);
+                stim_time_sec = stim_idx / fs;
+                stim_times_sec = [stim_times_sec; stim_time_sec]; %#ok<AGROW>
+            end
+        end
+    end
+end
+
+stim_times_sec = sort(stim_times_sec);
+stimTimesConverted = stim_times_sec(:); % [T x 1] vector, seconds
+fprintf('Found %d stimulation events.\n', length(stimTimesConverted));
+
+%% --- EXTRACT SPIKE TIMES FOR ALL CHANNELS AND REMOVE ARTIFACT SPIKES ---
+fprintf('Cleaning spike data and removing artifact spikes...\n');
+spikeTimesConvertedCleaned = cell(1, numChannels);
+
+for ch = 1:numChannels
+    if isempty(spikeTimesConverted{ch}) || ~isfield(spikeTimesConverted{ch}, spikeMethod)
+        spikeTimesConvertedCleaned{ch} = [];
+    else
+        spikeTimes_sec = spikeTimesConverted{ch}.(spikeMethod); % s
+        % Remove spikes near any stim
+        for stimIdx = 1:numel(stimTimesConverted)
+            stimTime = stimTimesConverted(stimIdx); % s
+            spikeTimes_sec = spikeTimes_sec(...
+                spikeTimes_sec < (stimTime + artifact_window_ms(1)/1000) | ...
+                spikeTimes_sec >= (stimTime + artifact_window_ms(2)/1000) ...
+                );
+        end
+        spikeTimesConvertedCleaned{ch} = sort(spikeTimes_sec(:)); % [S x 1] vector, seconds
+    end
+end
+
+%% --- EXCLUDE ELECTRODES WITH FIRING RATE < 0.1 Hz (OPTIONAL) ---
+min_frequency = 0.1; % Hz
+excluded_count = 0;
+firingRates = zeros(1, numChannels);
+
+if DO_SPIKE_FREQ_REMOVAL
+   for ch = 1:numChannels
+        spikes = spikeTimesConvertedCleaned{ch};
+        firingRates(ch) = numel(spikes) / recording_length_sec;
+       if ~isempty(spikes) && firingRates(ch) < min_frequency
+           spikeTimesConvertedCleaned{ch} = [];
+           excluded_count = excluded_count + 1;
+       end
+    end
+    fprintf('Excluded %d electrodes with firing rates below %.2f Hz.\n', excluded_count, min_frequency);
+else
+    for ch = 1:numChannels
+        spikes = spikeTimesConvertedCleaned{ch};
+        firingRates(ch) = numel(spikes) / recording_length_sec;
+    end
+    fprintf('Spike frequency exclusion skipped; all electrodes retained.\n');
+end
+
+%% --- SAVE INTERMEDIATE OUTPUT ---
+fprintf('Saving intermediate files...\n');
+save('spikeTimesConvertedCleaned.mat', 'spikeTimesConvertedCleaned');
+save('stimTimesConverted.mat', 'stimTimesConverted');
+
+%% Prepare ephys structure for RasterPSTH_batch
+fprintf('Preparing data structures for PSTH analysis...\n');
+ephysStruct = struct();
+ephysStruct.cids = [];
+ephysStruct.st = []; % Will hold all spike times
+ephysStruct.clu = []; % Will hold corresponding cluster IDs
+ephysStruct.temps = []; % Leave empty if you don't have templates
+
+% Add only electrodes that have spikes
+validElectrodes = find(~cellfun(@isempty, spikeTimesConvertedCleaned));
+fprintf('Processing %d electrodes with spike data...\n', length(validElectrodes));
+
+for i = 1:length(validElectrodes)
+    e = validElectrodes(i);
+    ephysStruct.cids(i) = e-1; % 0-indexed cluster IDs
+    
+    % Get spike times for this electrode
+    these_spikes = spikeTimesConvertedCleaned{e};
+    
+    % Add to the combined arrays
+    ephysStruct.st = [ephysStruct.st; these_spikes];
+    ephysStruct.clu = [ephysStruct.clu; ones(length(these_spikes), 1) * (e-1)];
+end
+
+%% Prepare events structure for PSTH
+% Create the events cell array (1 event type: stimulation)
+events = cell(1, 2);
+events{1, 1} = 'Stimulation'; % Label
+events{1, 2} = stimTimesConverted; % Vector of stimulus times
+
+% Optional: Create a sortBy to show trials in sequential order
+sortBy = cell(1, 2);
+sortBy{1, 1} = 'Trial Number';
+sortBy{1, 2} = (1:length(stimTimesConverted))';
+
+% Create empty cell arrays for splitBy (not an empty matrix)
+splitBy = cell(1, 2);
+splitByColours = cell(1, 1);
+
+%% Run PSTH analysis
+fprintf('Generating PSTHs for %d electrodes across %d stimulation trials...\n', ...
+    length(validElectrodes), length(stimTimesConverted));
+
+try
+    easy.RasterPSTH_batch(ephysStruct, [], saveDir, events, splitBy, splitByColours, sortBy, window, psthBinWidth, psthSmoothWidth, titleText);
+    fprintf('PSTH generation complete. %d figures saved to: %s\n', length(validElectrodes), saveDir);
+catch ME
+    fprintf('Error generating PSTHs: %s\n', ME.message);
+    fprintf('Stack trace:\n');
+    disp(getReport(ME));
+end
+
+fprintf('Script execution completed.\n');
