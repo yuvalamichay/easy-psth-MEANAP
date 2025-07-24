@@ -15,8 +15,8 @@ numChannels = 60; % adjust as needed
 saveDir = 'PSTHs'; % directory where figures per channel will be saved
 window = [-0.2 0.8]; % time window around stimulation events in seconds (pre and post)
 psthBinWidth = 0.005; % bin width
-psthSmoothWidth = 0.025; % smoothing width
-titleText = 'Electrode Stimulation PSTH'; % Title for plots
+psthSmoothWidth = 0.025; % smoothing width for PSTH
+titleText = 'Electrode Stimulation PSTH'; % title for plots
 
 % --- ENABLE OR DISABLE SPIKE FREQUENCY REMOVAL ---
 DO_SPIKE_FREQ_REMOVAL = true; % <-- set to false to skip spike frequency filtering
@@ -33,13 +33,14 @@ S = load(spikeFile);
 if isfield(S, 'spikeTimes')
     spikeTimesConverted = S.spikeTimes;
 elseif isfield(S, 'spikes')
+    % Convert Mona's 'spikes' matrix to struct format
     disp('Converting ''spikes'' matrix to ''spiketimesconverted'' struct format...');
     [row, col] = find(S.spikes);
     spikeTimesConverted = cell(1, numChannels);
     for ch = 1:numChannels
-        spike_samples = row(col == ch);
-        spike_sec = spike_samples / fs;
-        spikeTimesConverted{ch} = struct(spikeMethod, spike_sec);
+        spike_samples = row(col == ch); % get spike samples for channel
+        spike_sec = spike_samples / fs; % convert to seconds
+        spikeTimesConverted{ch} = struct(spikeMethod, spike_sec); % store in struct
     end
 else
     error('Neither ''spikeTimes'' nor ''spikes'' found in file.');
@@ -54,14 +55,16 @@ else
     error('Raw data variable "dat" not found in %s', rawFile);
 end
 
-[num_samples, ~] = size(dat);
-recording_length_sec = num_samples / fs;
+[num_samples, ~] = size(dat); % get number of samples in recording
+recording_length_sec = num_samples / fs; % calculate recording duration in seconds
 
+%---- PARAMETERS FOR STIMULATION DETECTION -----
+% Currently hardcoded to fit Mona's data
 stimThreshold = -1000; % adjust as needed, currently AbsPos threshold
-flat_window_ms = 1.5; % minimum length of flat segment
-flat_thresh = 0.05;
-min_interval_ms = 2500;
-flat_search_window_ms = 100; 
+flat_window_ms = 1.5; % minimum length of flat segment in ms
+flat_thresh = 0.05; % threshold for flatness
+min_interval_ms = 2500; % minimum interval between stim events in ms
+flat_search_window_ms = 100; % window to search for flat segments in ms
 flat_window_samples = round(flat_window_ms * fs / 1000);
 flat_search_samples = round(flat_search_window_ms * fs / 1000);
 
@@ -72,7 +75,7 @@ for channel_idx = 1:numChannels
     if isempty(idx), continue, end
     idx = idx(:);
     keep = [true; diff(idx) > round(0.010 * fs)];
-    idx = idx(keep);
+    idx = idx(keep); % remove close indices
     for i = 1:length(idx)
         center_idx = idx(i);
         win_start = max(1, center_idx - flat_search_samples);
@@ -99,10 +102,11 @@ for channel_idx = 1:numChannels
 end
 
 stim_times_sec = sort(stim_times_sec);
-stimTimesConverted = stim_times_sec(:); % [T x 1] vector, seconds
+stimTimesConverted = stim_times_sec(:); % [T x 1] column vector, sec
 fprintf('Found %d stimulation events.\n', length(stimTimesConverted));
 
 %% --- EXTRACT SPIKE TIMES FOR ALL CHANNELS AND REMOVE ARTIFACT SPIKES ---
+% Remove spikes near stimulation events (artifact removal)
 fprintf('Cleaning spike data and removing artifact spikes...\n');
 spikeTimesConvertedCleaned = cell(1, numChannels);
 
@@ -123,12 +127,12 @@ for ch = 1:numChannels
     end
 end
 
-%% --- EXCLUDE ELECTRODES WITH FIRING RATE < 0.1 Hz (OPTIONAL) ---
-min_frequency = 0.1; % Hz
+%% --- EXCLUDE ELECTRODES WITH FIRING RATE < 0.1 Hz ---
+min_frequency = 0.1; % minimum firing rate (Hz) for inclusion
 excluded_count = 0;
 firingRates = zeros(1, numChannels);
 
-if DO_SPIKE_FREQ_REMOVAL
+if DO_SPIKE_FREQ_REMOVAL % only performed if specified at the start
    for ch = 1:numChannels
         spikes = spikeTimesConvertedCleaned{ch};
         firingRates(ch) = numel(spikes) / recording_length_sec;
@@ -146,7 +150,7 @@ else
     fprintf('Spike frequency exclusion skipped; all electrodes retained.\n');
 end
 
-%% --- SAVE INTERMEDIATE OUTPUT ---
+%% --- SAVE OUTPUT ---
 fprintf('Saving intermediate files...\n');
 save('spikeTimesConvertedCleaned.mat', 'spikeTimesConvertedCleaned');
 save('stimTimesConverted.mat', 'stimTimesConverted');
@@ -154,9 +158,9 @@ save('stimTimesConverted.mat', 'stimTimesConverted');
 %% Prepare ephys structure for RasterPSTH_batch
 fprintf('Preparing data structures for PSTH analysis...\n');
 ephysStruct = struct();
-ephysStruct.cids = [];
-ephysStruct.st = []; % Will hold all spike times
-ephysStruct.clu = []; % Will hold corresponding cluster IDs
+ephysStruct.cids = []; % cluster IDs
+ephysStruct.st = []; % will hold all spike times 
+ephysStruct.clu = []; % will hold corresponding cluster IDs
 ephysStruct.temps = []; % Leave empty if you don't have templates
 
 % Add only electrodes that have spikes
@@ -178,17 +182,17 @@ end
 %% Prepare events structure for PSTH
 % Create the events cell array (1 event type: stimulation)
 events = cell(1, 2);
-events{1, 1} = 'Stimulation'; % Label
-events{1, 2} = stimTimesConverted; % Vector of stimulus times
+events{1, 1} = 'Stimulation'; % event label
+events{1, 2} = stimTimesConverted; % event times
 
 % Optional: Create a sortBy to show trials in sequential order
 sortBy = cell(1, 2);
-sortBy{1, 1} = 'Trial Number';
-sortBy{1, 2} = (1:length(stimTimesConverted))';
+sortBy{1, 1} = 'Trial Number'; % sorting label
+sortBy{1, 2} = (1:length(stimTimesConverted))'; % trial numbers
 
 % Create empty cell arrays for splitBy (not an empty matrix)
-splitBy = cell(1, 2);
-splitByColours = cell(1, 1);
+splitBy = cell(1, 2); % currently placeholder for splitting trials
+splitByColours = cell(1, 1); % currently placeholder for split colors
 
 %% Run PSTH analysis
 fprintf('Generating PSTHs for %d electrodes across %d stimulation trials...\n', ...
