@@ -26,6 +26,8 @@ if ~exist(saveDir, 'dir')
     mkdir(saveDir);
 end
 
+assert(exist(saveDir, 'dir') == 7, 'Failed to create save directory: %s', saveDir);
+
 %% --- CONVERT SPIKE TIMES ---
   % either maintains spikeTimes as per MEA-NAP output or converts Mona's 'spikes' data structure 
 fprintf('Loading and converting spike data...\n');
