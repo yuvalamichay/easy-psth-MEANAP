@@ -12,10 +12,10 @@ spikeMethod = 'bior1p5'; % adjust as needed
 numChannels = 60; % adjust as needed
 
 % PSTH parameters
-saveDir = 'PSTHs'; % directory where figures per channel will be saved
-window = [-0.2 0.8]; % time window around stimulation events in seconds (pre and post)
-psthBinWidth = 0.005; % bin width
-psthSmoothWidth = 0.025; % smoothing width for PSTH
+saveDir = 'PSTHsTest'; % directory where figures per channel will be saved
+window = [-0.1 0.5]; % time window around stimulation events in seconds (pre and post)
+psthBinWidth = 0.002; % bin width
+psthSmoothWidth = 0.020; % smoothing width for PSTH
 titleText = 'Electrode Stimulation PSTH'; % title for plots
 
 % --- ENABLE OR DISABLE SPIKE FREQUENCY REMOVAL ---
@@ -163,7 +163,6 @@ ephysStruct = struct();
 ephysStruct.cids = []; % cluster IDs
 ephysStruct.st = []; % will hold all spike times 
 ephysStruct.clu = []; % will hold corresponding cluster IDs
-ephysStruct.temps = []; % Leave empty if you don't have templates
 
 % Add only electrodes that have spikes
 validElectrodes = find(~cellfun(@isempty, spikeTimesConvertedCleaned));
