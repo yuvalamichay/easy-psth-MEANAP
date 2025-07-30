@@ -170,7 +170,7 @@ fprintf('Processing %d electrodes with spike data...\n', length(validElectrodes)
 
 for i = 1:length(validElectrodes)
     e = validElectrodes(i);
-    ephysStruct.cids(i) = e-1; % 0-indexed cluster IDs
+    ephysStruct.cids(i) = e; 
     
     % Get spike times for this electrode
     these_spikes = spikeTimesConvertedCleaned{e};
