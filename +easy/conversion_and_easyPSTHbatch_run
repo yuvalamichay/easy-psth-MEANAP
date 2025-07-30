@@ -12,8 +12,8 @@ spikeMethod = 'bior1p5'; % adjust as needed
 numChannels = 60; % adjust as needed
 
 % PSTH parameters
-saveDir = 'PSTHsTest'; % directory where figures per channel will be saved
-window = [-0.1 0.5]; % time window around stimulation events in seconds (pre and post)
+saveDir = 'PSTHsTestIndexing'; % directory where figures per channel will be saved
+window = [-0.1 0.05]; % time window around stimulation events in seconds (pre and post)
 psthBinWidth = 0.002; % bin width
 psthSmoothWidth = 0.020; % smoothing width for PSTH
 titleText = 'Electrode Stimulation PSTH'; % title for plots
@@ -177,7 +177,7 @@ for i = 1:length(validElectrodes)
     
     % Add to the combined arrays
     ephysStruct.st = [ephysStruct.st; these_spikes];
-    ephysStruct.clu = [ephysStruct.clu; ones(length(these_spikes), 1) * (e-1)];
+    ephysStruct.clu = [ephysStruct.clu; ones(length(these_spikes), 1) * e];
 end
 
 %% Prepare events structure for PSTH
