@@ -1,0 +1,204 @@
+
+%% TUTORIAL OF KERNEL DENSITY ESTIMATION FOR PSTH
+% This script demonstrates how to generate a Peri-Stimulus Time Histogram (PSTH)
+% and apply fixed and locally-adaptive kernel density estimation using
+% sskernel.m and ssvkernel.m. It also includes a raster plot of spike
+% times for each trial.
+
+clear; clc;
+
+%% --- USER PARAMETERS ---
+% --- Input files ---
+spikeFile = 'OWT220207_1I_DIV63_HUB63_6UA_Cspikes_L0_RP2.mat_Nortefact.mat';
+rawFile   = 'OWT220207_1I_DIV63_HUB63_6UA.mat';
+
+% --- Recording parameters ---
+fs = 25000; % sample rate (Hz)
+spikeMethod = 'bior1p5'; % adjust as needed, should match field in spikeFile
+numChannels = 60; % adjust as needed
+artifact_window_ms = [0, 2]; % window around stim (in ms) to use for artifact removal
+
+% --- Analysis parameters ---
+% Set the channel number you want to analyze (1-based index).
+% The script will access the data at this exact index.
+channelToAnalyze = 14;
+psth_window_s = [0, 0.05]; % PSTH time window around stimulation events in seconds [start, end]
+psth_bin_width_s = 0.001; % Bin width for histogram in seconds
+
+%% --- STEP 1: LOAD AND PROCESS DATA ---
+fprintf('Loading and processing data...\n');
+
+% --- Convert spike times ---
+S = load(spikeFile);
+if isfield(S, 'spikeTimes')
+    spikeTimesConverted = S.spikeTimes;
+elseif isfield(S, 'spikes')
+    fprintf('Converting ''spikes'' matrix to standard format...\n');
+    [row, col] = find(S.spikes);
+    spikeTimesConverted = cell(1, numChannels);
+    for ch = 1:numChannels
+        spike_samples = row(col == ch);
+        spike_sec = spike_samples / fs;
+        spikeTimesConverted{ch} = struct(spikeMethod, spike_sec);
+    end
+else
+    error('Neither ''spikeTimes'' nor ''spikes'' found in %s.', spikeFile);
+end
+
+% --- Estimate stimulation times ---
+R = load(rawFile);
+if isfield(R, 'dat')
+    dat = double(R.dat);
+else
+    error('Raw data variable "dat" not found in %s', rawFile);
+end
+
+[num_samples, ~] = size(dat);
+stimThreshold = -1000;
+min_interval_ms = 2500;
+flat_search_window_ms = 100;
+flat_window_ms = 1.5;
+flat_thresh = 0.05;
+flat_window_samples = round(flat_window_ms * fs / 1000);
+flat_search_samples = round(flat_search_window_ms * fs / 1000);
+
+stim_times_sec = [];
+for channel_idx = 1:numChannels
+    trace = dat(:, channel_idx);
+    idx = find(trace > stimThreshold);
+    if isempty(idx), continue, end
+    idx = idx(:);
+    keep = [true; diff(idx) > round(0.010 * fs)];
+    idx = idx(keep);
+    for i = 1:length(idx)
+        center_idx = idx(i);
+        win_start = max(1, center_idx - flat_search_samples);
+        win_end = min(num_samples, center_idx + flat_search_samples);
+        win_trace = trace(win_start:win_end);
+        abs_diff = [0; abs(diff(win_trace))];
+        mov_abs_diff = movmean(abs_diff, flat_window_samples);
+        flat_idx = find(mov_abs_diff < flat_thresh);
+        if ~isempty(flat_idx)
+            flat_onsets = flat_idx([true; diff(flat_idx) > 1]);
+            flat_onsets_adj = flat_onsets - floor(flat_window_samples/2);
+            flat_onsets_adj(flat_onsets_adj < 1) = 1;
+            if ~isempty(flat_onsets_adj)
+                keep_idx = [true; diff(flat_onsets_adj) > round(min_interval_ms * fs / 1000)];
+                flat_onsets_adj = flat_onsets_adj(keep_idx);
+            end
+            for j = 1:length(flat_onsets_adj)
+                stim_idx = win_start - 1 + flat_onsets_adj(j);
+                stim_times_sec = [stim_times_sec; stim_idx / fs]; %#ok<AGROW>
+            end
+        end
+    end
+end
+stimTimes = sort(unique(stim_times_sec(:)));
+fprintf('Found %d stimulation events.\n', length(stimTimes));
+
+% --- Extract and clean spikes for the selected channel ---
+% Using channelToAnalyze directly as the index.
+fprintf('>>> Accessing data for channel %d at index %d of the data array.\n', channelToAnalyze, channelToAnalyze);
+
+if channelToAnalyze > numChannels || channelToAnalyze < 1 || isempty(spikeTimesConverted{channelToAnalyze}) || ~isfield(spikeTimesConverted{channelToAnalyze}, spikeMethod)
+    spikeTimes = [];
+else
+    spikeTimes_sec = spikeTimesConverted{channelToAnalyze}.(spikeMethod);
+    % Remove spikes near any stim (artifact removal)
+    for stimIdx = 1:numel(stimTimes)
+        stimTime = stimTimes(stimIdx);
+        spikeTimes_sec = spikeTimes_sec(...
+            spikeTimes_sec < (stimTime + artifact_window_ms(1)/1000) | ...
+            spikeTimes_sec >= (stimTime + artifact_window_ms(2)/1000) ...
+            );
+    end
+    spikeTimes = sort(spikeTimes_sec(:));
+end
+
+if isempty(spikeTimes)
+    error('No spikes found for channel %d after cleaning.', channelToAnalyze);
+end
+fprintf('Processing %d spikes from channel %d.\n', length(spikeTimes), channelToAnalyze);
+
+%% --- STEP 2: ALIGN SPIKES TO CREATE PSTH DATA ---
+% This part of the code is inspired by the `alignEventTimes` function in +easy/RasterPSTH.m
+fprintf('Aligning spikes to stimulation events...\n');
+
+out = WithinRanges(spikeTimes, stimTimes + psth_window_s, (1:length(stimTimes))', 'matrix');
+spikeTimes_byEvent = arrayfun(@(n) spikeTimes(logical(out(:,n))) - stimTimes(n), 1:length(stimTimes), 'uni', 0)';
+
+% Aggregate all relative spike times into one vector for kernel density estimation
+psth_samples = cell2mat(spikeTimes_byEvent);
+
+if isempty(psth_samples)
+    error('No spikes found within the specified PSTH window for any stimulation event.');
+end
+
+%% --- STEP 3: PLOT RASTER, HISTOGRAM, AND SMOOTHED PSTHS ---
+fprintf('Generating plots...\n');
+
+figure('Position',[100 100 800 900]); % Increased figure height
+
+% --- Plot 1: Raster Plot ---
+ax_raster = subplot(4,1,1);
+hold on;
+for trial_idx = 1:length(spikeTimes_byEvent)
+    trial_spikes = spikeTimes_byEvent{trial_idx};
+    if ~isempty(trial_spikes)
+        % Plot spikes as vertical ticks
+        line([trial_spikes'; trial_spikes'], repmat([trial_idx-0.4; trial_idx+0.4], 1, length(trial_spikes)), 'Color', 'k');
+    end
+end
+hold off;
+set(gca, 'YDir', 'reverse'); % Puts trial 1 at the top
+xlim(psth_window_s);
+ylim([0 length(spikeTimes_byEvent)+1]);
+ylabel('Trial Number');
+title(['Raster and PSTH for Channel ' num2str(channelToAnalyze)]);
+set(gca, 'XTickLabel', []); % Hide x-axis labels to avoid clutter with plot below
+
+% --- Plot 2: Histogram and Smoothed PSTHs ---
+ax_psth = subplot(4,1,2:3); hold on;
+edges = psth_window_s(1):psth_bin_width_s:psth_window_s(2);
+b = histc(psth_samples, edges);
+bar(edges, b/sum(b)/psth_bin_width_s, 1);
+h = findobj(gca,'Type','patch');
+set(h,'FaceColor',.7*[1 1 1],'EdgeColor',0.8*[1 1 1]);
+set(gca,'XTickLabel',[]);
+
+% Create a vector of estimation points
+L = 1000;
+t = linspace(psth_window_s(1), psth_window_s(2), L);
+
+% Kernel Density Estimation with Fixed Bandwidth
+fprintf('Running sskernel (fixed bandwidth)...\n');
+[yf, tf, optw_fixed] = sskernel(psth_samples, t);
+plot(tf, yf, 'b-', 'LineWidth', 2);
+
+% Locally Adaptive Kernel Density Estimation
+fprintf('Running ssvkernel (variable bandwidth)...\n');
+[yv, tv, optw_variable] = ssvkernel(psth_samples, t);
+plot(tv, yv, 'r-', 'LineWidth', 2);
+
+set(gca,'XLim', psth_window_s);
+ylabel('Firing Rate (spikes/s)');
+lgd1 = legend('PSTH', 'Fixed Bandwidth', 'Variable Bandwidth', 'Location', 'Best');
+lgd1.Box = 'off';
+grid on;
+set(gca, 'XTickLabel', []); % Hide x-axis labels to avoid clutter
+
+% --- Plot 3: Bandwidths ---
+ax_bw = subplot(4,1,4); hold on;
+plot(t, optw_fixed * ones(1, L), 'b-', 'LineWidth', 2);
+plot(tv, optw_variable, 'r', 'LineWidth', 2);
+set(gca,'XLim', psth_window_s);
+ylabel('Bandwidth (s)');
+xlabel('Time from stimulus (s)');
+lgd2 = legend('Fixed', 'Variable', 'Location', 'Best');
+lgd2.Box = 'off';
+grid on;
+
+% Link the x-axes of all plots
+linkaxes([ax_raster, ax_psth, ax_bw], 'x');
+
+fprintf('Script finished.\n');
