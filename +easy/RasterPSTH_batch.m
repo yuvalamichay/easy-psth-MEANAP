@@ -28,6 +28,11 @@ for c = 1:length(clusterIDs)
     cluID = clusterIDs(c); %cluID is 0-indexed. Therefore cluID+1 converts to 1-indexing.
     spikeTimes = ephysStruct.st(ephysStruct.clu==cluID);
     
+    if isempty(spikeTimes)
+        fprintf('Skipping clu%d because it has no spikes.\n', cluID);
+        continue;
+    end
+    
     clusterTitle = {titleText,sprintf('clu%d',cluID)};
 
     fig_path = fullfile(saveDir, [strjoin(clusterTitle,'_'), '.png']   );
