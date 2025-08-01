@@ -145,8 +145,8 @@ hold on;
 for trial_idx = 1:length(spikeTimes_byEvent)
     trial_spikes = spikeTimes_byEvent{trial_idx};
     if ~isempty(trial_spikes)
-        % Plot spikes as vertical ticks
-        line([trial_spikes'; trial_spikes'], repmat([trial_idx-0.4; trial_idx+0.4], 1, length(trial_spikes)), 'Color', 'k');
+        % Plot spikes as red small dots
+        plot(trial_spikes, trial_idx * ones(size(trial_spikes)), 'r.', 'MarkerSize', 3);
     end
 end
 hold off;
@@ -156,7 +156,6 @@ ylim([0 length(spikeTimes_byEvent)+1]);
 ylabel('Trial Number');
 title(['Raster and PSTH for Channel ' num2str(channelToAnalyze)]);
 set(gca, 'XTickLabel', []); % Hide x-axis labels to avoid clutter with plot below
-
 % --- Plot 2: Histogram and Smoothed PSTHs ---
 ax_psth = subplot(4,1,2:3); hold on;
 edges = psth_window_s(1):psth_bin_width_s:psth_window_s(2);
