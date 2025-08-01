@@ -1,0 +1,438 @@
+% Multi-channel variable kernel PSTH on 8x8 grid with corners removed
+
+clear; clc;
+
+% Load and process as before
+spikeFile = 'OWT220207_1I_DIV63_HUB63_6UA_Cspikes_L0_RP2.mat_Nortefact.mat';
+rawFile   = 'OWT220207_1I_DIV63_HUB63_6UA.mat';
+fs = 25000;
+spikeMethod = 'bior1p5';
+numChannels = 60;
+artifact_window_ms = [0, 2];
+psth_window_s = [0, 0.05];
+psth_bin_width_s = 0.001;
+
+%%
+
+S = load(spikeFile);
+if isfield(S, 'spikeTimes')
+    spikeTimesConverted = S.spikeTimes;
+elseif isfield(S, 'spikes')
+    [row, col] = find(S.spikes);
+    spikeTimesConverted = cell(1, numChannels);
+    for ch = 1:numChannels
+        spike_samples = row(col == ch);
+        spike_sec = spike_samples / fs;
+        spikeTimesConverted{ch} = struct(spikeMethod, spike_sec);
+    end
+else
+    error('Neither ''spikeTimes'' nor ''spikes'' found.');
+end
+
+R = load(rawFile);
+if isfield(R, 'dat')
+    dat = double(R.dat);
+else
+    error('Raw data variable "dat" not found.');
+end
+
+
+%%
+[num_samples, ~] = size(dat);
+stimThreshold = -1000;
+min_interval_ms = 2500;
+flat_search_window_ms = 100;
+flat_window_ms = 1.5;
+flat_thresh = 0.05;
+flat_window_samples = round(flat_window_ms * fs / 1000);
+flat_search_samples = round(flat_search_window_ms * fs / 1000);
+
+stim_times_sec = [];
+for channel_idx = 1:numChannels
+    trace = dat(:, channel_idx);
+    idx = find(trace > stimThreshold);
+    if isempty(idx), continue, end
+    idx = idx(:);
+    keep = [true; diff(idx) > round(0.010 * fs)];
+    idx = idx(keep);
+    for i = 1:length(idx)
+        center_idx = idx(i);
+        win_start = max(1, center_idx - flat_search_samples);
+        win_end = min(num_samples, center_idx + flat_search_samples);
+        win_trace = trace(win_start:win_end);
+        abs_diff = [0; abs(diff(win_trace))];
+        mov_abs_diff = movmean(abs_diff, flat_window_samples);
+        flat_idx = find(mov_abs_diff < flat_thresh);
+        if ~isempty(flat_idx)
+            flat_onsets = flat_idx([true; diff(flat_idx) > 1]);
+            flat_onsets_adj = flat_onsets - floor(flat_window_samples/2);
+            flat_onsets_adj(flat_onsets_adj < 1) = 1;
+            if ~isempty(flat_onsets_adj)
+                keep_idx = [true; diff(flat_onsets_adj) > round(min_interval_ms * fs / 1000)];
+                flat_onsets_adj = flat_onsets_adj(keep_idx);
+            end
+            for j = 1:length(flat_onsets_adj)
+                stim_idx = win_start - 1 + flat_onsets_adj(j);
+                stim_times_sec = [stim_times_sec; stim_idx / fs]; %#ok<AGROW>
+            end
+        end
+    end
+end
+stimTimes = sort(unique(stim_times_sec(:)));
+
+%%
+% Prepare PSTH parameters
+L = 1000;
+t = linspace(psth_window_s(1), psth_window_s(2), L);
+
+% Layout matrix for 8x8 grid
+layout = [ ...
+     0   24   26   29   32   35   37   0; 
+    21   22   25   30   31   36   39  40;
+    19   20   23   28   33   38   41  42;
+    16   17   18   27   34   43   44  45;
+    15   14   13    4   57   48   47  46;
+    12   11    8    3   58   53   50  49;
+    10    9    6    1   60   55   52  51;
+     0    7    5    2   59   56   54   0];
+
+%% --- Get PSTH data for all channels ---
+psth_data = cell(1, numChannels);
+max_y = 0;
+for ch = 1:numChannels
+    if isempty(spikeTimesConverted{ch}) || ~isfield(spikeTimesConverted{ch}, spikeMethod)
+        psth_data{ch} = [];
+        continue;
+    end
+    spikeTimes_sec = spikeTimesConverted{ch}.(spikeMethod);
+    % Remove spikes near any stim (artifact removal)
+    for stimIdx = 1:numel(stimTimes)
+        stimTime = stimTimes(stimIdx);
+        spikeTimes_sec = spikeTimes_sec(...
+            spikeTimes_sec < (stimTime + artifact_window_ms(1)/1000) | ...
+            spikeTimes_sec >= (stimTime + artifact_window_ms(2)/1000) ...
+            );
+    end
+    spikes_clean = sort(spikeTimes_sec(:));
+    if isempty(spikes_clean)
+        psth_data{ch} = [];
+        continue;
+    end
+    % Align spikes to stimulation events
+    out = WithinRanges(spikes_clean, stimTimes + psth_window_s, (1:length(stimTimes))', 'matrix');
+    spikeTimes_byEvent = arrayfun(@(n) spikes_clean(logical(out(:,n))) - stimTimes(n), 1:length(stimTimes), 'uni', 0)';
+    psth_samples = cell2mat(spikeTimes_byEvent);
+    if isempty(psth_samples)
+        psth_data{ch} = [];
+        continue;
+    end
+    % Calculate PSTH using ssvkernel
+   % [yv, tv] = ssvkernel(psth_samples, t, [], 'Gauss');
+    [yv, tv, optw_variable] = ssvkernel(psth_samples, t);
+    psth_data{ch} = struct('tv', tv, 'yv', yv);
+    max_y = max([max_y, max(yv)]);
+end
+
+%% PLOT
+% Determine shared max y for all plots (spikes/s)
+max_y = 0;
+for ch = 1:numChannels
+    if ~isempty(psth_data{ch})
+        max_y = max([max_y, max(psth_data{ch}.yv)]);
+    end
+end
+
+% Figure 1: individual y-axis per plot, channel labels per label_layout
+figure('Position', [100 100 1200 1200]);
+for row = 1:8
+    for col = 1:8
+        phys_ch = physical_layout(row, col);
+        disp_ch = label_layout(row, col);
+        subplot(8,8,(row-1)*8 + col);
+        if phys_ch < 1 || phys_ch > numChannels || isempty(psth_data{phys_ch})
+            axis off;
+            continue;
+        end
+        plot(psth_data{phys_ch}.tv, psth_data{phys_ch}.yv, 'r', 'LineWidth', 1.5); % RED
+        xlim(psth_window_s);
+        set(gca,'XTick',[],'YTick',[]);
+        title(sprintf('%d', disp_ch));
+        box off;
+        % Show y-axis range below plot
+        yl = ylim;
+        text(mean(xlim), yl(1)-0.07*(yl(2)-yl(1)), ...
+            sprintf('%.2f–%.2f spikes/s', yl(1), yl(2)), ...
+            'HorizontalAlignment', 'center', 'FontSize', 7);
+    end
+end
+sgtitle('Variable kernel PSTH for each channel (individual y-axis)', 'FontWeight','bold');
+
+% Figure 2: shared y-axis, channel labels per label_layout
+figure('Position', [100 100 1200 1200]);
+for row = 1:8
+    for col = 1:8
+        phys_ch = physical_layout(row, col);
+        disp_ch = label_layout(row, col);
+        subplot(8,8,(row-1)*8 + col);
+        if phys_ch < 1 || phys_ch > numChannels || isempty(psth_data{phys_ch})
+            axis off;
+            continue;
+        end
+        plot(psth_data{phys_ch}.tv, psth_data{phys_ch}.yv, 'r', 'LineWidth', 1.5); % RED
+        xlim(psth_window_s);
+        ylim([0 max_y]);
+        set(gca,'XTick',[],'YTick',[]);
+        title(sprintf('%d', disp_ch));
+        box off;
+        % Show y-axis range below plot (all the same)
+        text(mean(xlim), 0-0.07*max_y, ...
+            sprintf('0–%.2f spikes/s', max_y), ...
+            'HorizontalAlignment', 'center', 'FontSize', 7);
+    end
+end
+sgtitle('Variable kernel PSTH for each channel (shared y-axis)', 'FontWeight','bold');
+
+
+%%
+clear; clc;
+
+% ------------------------------
+% USER PARAMETERS
+% ------------------------------
+spikeFile = 'OWT220207_1I_DIV63_HUB63_6UA_Cspikes_L0_RP2.mat_Nortefact.mat';
+rawFile   = 'OWT220207_1I_DIV63_HUB63_6UA.mat';
+fs = 25000;
+spikeMethod = 'bior1p5';
+numChannels = 60;
+artifact_window_ms = [0, 2];
+psth_window_s = [0, 0.05];
+psth_bin_width_s = 0.001;
+
+% 8x8 physical layout (for extracting channel data)
+physical_layout = [ ...
+     0   24   26   29   32   35   37   0; 
+    21   22   25   30   31   36   39  40;
+    19   20   23   28   33   38   41  42;
+    16   17   18   27   34   43   44  45;
+    15   14   13    4   57   48   47  46;
+    12   11    8    3   58   53   50  49;
+    10    9    6    1   60   55   52  51;
+     0    7    5    2   59   56   54   0];
+
+% 8x8 label layout (for plot titles)
+label_layout = [ ...
+    0, 21, 31, 41, 51, 61, 71,  0;
+    12, 22, 32, 42, 52, 62, 72, 82;
+    13, 23, 33, 43, 53, 63, 73, 83;
+    14, 24, 34, 44, 54, 64, 74, 84;
+    15, 25, 35, 45, 55, 65, 75, 85;
+    16, 26, 36, 46, 56, 66, 76, 86;
+    17, 27, 37, 47, 57, 67, 77, 87;
+    0, 28, 38, 48, 58, 68, 78, 0];
+
+% ------------------------------
+% LOAD AND PROCESS DATA
+% ------------------------------
+fprintf('Loading spike and raw data...\n');
+S = load(spikeFile);
+if isfield(S, 'spikeTimes')
+    spikeTimesConverted = S.spikeTimes;
+elseif isfield(S, 'spikes')
+    [row, col] = find(S.spikes);
+    spikeTimesConverted = cell(1, numChannels);
+    for ch = 1:numChannels
+        spike_samples = row(col == ch);
+        spike_sec = spike_samples / fs;
+        spikeTimesConverted{ch} = struct(spikeMethod, spike_sec);
+    end
+else
+    error('Neither ''spikeTimes'' nor ''spikes'' found in spike file.');
+end
+
+R = load(rawFile);
+if isfield(R, 'dat')
+    dat = double(R.dat);
+else
+    error('Raw data variable "dat" not found in raw file.');
+end
+
+fprintf('Extracting stim times...\n');
+[num_samples, ~] = size(dat);
+stimThreshold = -1000;
+min_interval_ms = 2500;
+flat_search_window_ms = 100;
+flat_window_ms = 1.5;
+flat_thresh = 0.05;
+flat_window_samples = round(flat_window_ms * fs / 1000);
+flat_search_samples = round(flat_search_window_ms * fs / 1000);
+
+stim_times_sec = [];
+for channel_idx = 1:numChannels
+    trace = dat(:, channel_idx);
+    idx = find(trace > stimThreshold);
+    if isempty(idx), continue, end
+    idx = idx(:);
+    keep = [true; diff(idx) > round(0.010 * fs)];
+    idx = idx(keep);
+    for i = 1:length(idx)
+        center_idx = idx(i);
+        win_start = max(1, center_idx - flat_search_samples);
+        win_end = min(num_samples, center_idx + flat_search_samples);
+        win_trace = trace(win_start:win_end);
+        abs_diff = [0; abs(diff(win_trace))];
+        mov_abs_diff = movmean(abs_diff, flat_window_samples);
+        flat_idx = find(mov_abs_diff < flat_thresh);
+        if ~isempty(flat_idx)
+            flat_onsets = flat_idx([true; diff(flat_idx) > 1]);
+            flat_onsets_adj = flat_onsets - floor(flat_window_samples/2);
+            flat_onsets_adj(flat_onsets_adj < 1) = 1;
+            if ~isempty(flat_onsets_adj)
+                keep_idx = [true; diff(flat_onsets_adj) > round(min_interval_ms * fs / 1000)];
+                flat_onsets_adj = flat_onsets_adj(keep_idx);
+            end
+            for j = 1:length(flat_onsets_adj)
+                stim_idx = win_start - 1 + flat_onsets_adj(j);
+                stim_times_sec = [stim_times_sec; stim_idx / fs]; %#ok<AGROW>
+            end
+        end
+    end
+end
+stimTimes = sort(unique(stim_times_sec(:)));
+
+% ------------------------------
+% PSTH PARAMETERS
+% ------------------------------
+L = 1000;
+t = linspace(psth_window_s(1), psth_window_s(2), L);
+
+% ------------------------------
+% COMPUTE PSTH FOR ALL CHANNELS
+% ------------------------------
+fprintf('Computing PSTH for all channels...\n');
+psth_data = cell(1, numChannels);
+max_y = 0;
+
+for ch = 1:numChannels
+    if isempty(spikeTimesConverted{ch}) || ~isfield(spikeTimesConverted{ch}, spikeMethod)
+        psth_data{ch} = [];
+        continue;
+    end
+    spikeTimes_sec = spikeTimesConverted{ch}.(spikeMethod);
+    % Remove spikes near any stim (artifact removal)
+    for stimIdx = 1:numel(stimTimes)
+        stimTime = stimTimes(stimIdx);
+        spikeTimes_sec = spikeTimes_sec(...
+            spikeTimes_sec < (stimTime + artifact_window_ms(1)/1000) | ...
+            spikeTimes_sec >= (stimTime + artifact_window_ms(2)/1000) ...
+            );
+    end
+    spikes_clean = sort(spikeTimes_sec(:));
+    if isempty(spikes_clean)
+        psth_data{ch} = [];
+        continue;
+    end
+    % Align spikes to stimulation events
+    out = WithinRanges(spikes_clean, stimTimes + psth_window_s, (1:length(stimTimes))', 'matrix');
+    spikeTimes_byEvent = arrayfun(@(n) spikes_clean(logical(out(:,n))) - stimTimes(n), 1:length(stimTimes), 'uni', 0)';
+    psth_samples = cell2mat(spikeTimes_byEvent);
+    if isempty(psth_samples)
+        psth_data{ch} = [];
+        continue;
+    end
+    % Calculate PSTH using ssvkernel (Gauss)
+    [yv, tv, optw_variable] = ssvkernel(psth_samples, t);
+    psth_data{ch} = struct('tv', tv, 'yv', yv);
+    max_y = max([max_y, max(yv)]);
+end
+
+%% ------------------------------
+% PLOT GRID: INDIVIDUAL Y-AXIS
+% ------------------------------
+figure('Position', [100 100 1200 1200]);
+for row = 1:8
+    for col = 1:8
+        phys_ch = physical_layout(row, col);
+        disp_ch = label_layout(row, col);
+        subplot(8,8,(row-1)*8 + col);
+        if phys_ch < 1 || phys_ch > numChannels || isempty(psth_data{phys_ch})
+            axis off;
+            continue;
+        end
+        yv = psth_data{phys_ch}.yv;
+        tv = psth_data{phys_ch}.tv;
+        plot(tv, yv, 'r', 'LineWidth', 1.5);
+        xlim(psth_window_s);
+        miny = min(yv);
+        maxy = max(yv);
+        % If min == max (flat PSTH), expand the axis slightly
+        if miny == maxy
+            miny = miny - 0.5;
+            maxy = maxy + 0.5;
+        end
+        ylim([miny maxy]);
+        set(gca, 'YTick', [miny maxy], ...
+                 'YTickLabel', {sprintf('%.2f', miny), sprintf('%.2f', maxy)});
+        set(gca,'XTick',[]);
+        title(sprintf('%d', disp_ch));
+        box off;
+    end
+end
+sgtitle('Variable kernel PSTH for each channel (individual y-axis)', 'FontWeight','bold');
+
+% % Add sample axis in bottom left corner
+% ax = axes('Position', [0.05 0.05 0.12 0.12]); % Adjust position/size as needed
+% hold on;
+% example_x = psth_window_s;
+% example_y = [0 1]; % Arbitrary for illustration
+% 
+% % Draw axes
+% plot([example_x(1) example_x(2)], [example_y(1) example_y(1)], 'k', 'LineWidth', 1.5); % x-axis
+% plot([example_x(1) example_x(1)], [example_y(1) example_y(2)], 'k', 'LineWidth', 1.5); % y-axis
+% 
+% % Remove all ticks
+% set(gca, 'YTick', []);
+% set(gca, 'XTick', []);
+% 
+% % Add axis labels
+% xlabel('Time (s)', 'FontSize', 8);
+% ylabel('spikes/s', 'FontSize', 8);
+% 
+% % Set limits
+% xlim(example_x);
+% ylim(example_y);
+% 
+% % Show min/max x values as text at both ends of the axis line
+% text(example_x(1), example_y(1)-0.08*(example_y(2)-example_y(1)), ...
+%     sprintf('%.3f', example_x(1)), 'HorizontalAlignment','center', 'FontSize',8);
+% text(example_x(2), example_y(1)-0.08*(example_y(2)-example_y(1)), ...
+%     sprintf('%.3f', example_x(2)), 'HorizontalAlignment','center', 'FontSize',8);
+% 
+% box on;
+% set(gca, 'LineWidth', 1.5, 'FontSize', 8);
+
+%% ------------------------------
+% PLOT GRID: SHARED Y-AXIS
+% ------------------------------
+figure('Position', [100 100 1200 1200]);
+for row = 1:8
+    for col = 1:8
+        phys_ch = physical_layout(row, col);
+        disp_ch = label_layout(row, col);
+        subplot(8,8,(row-1)*8 + col);
+        if phys_ch < 1 || phys_ch > numChannels || isempty(psth_data{phys_ch})
+            axis off;
+            continue;
+        end
+        plot(psth_data{phys_ch}.tv, psth_data{phys_ch}.yv, 'r', 'LineWidth', 1.5); % RED
+        xlim(psth_window_s);
+        ylim([0 max_y]);
+        set(gca,'XTick',[],'YTick',[]);
+        title(sprintf('%d', disp_ch));
+        box off;
+        % Show y-axis range below plot (all the same)
+        % text(mean(xlim), 0-0.07*max_y, ...
+        %     sprintf('0–%.2f spikes/s', max_y), ...
+        %     'HorizontalAlignment', 'center', 'FontSize', 7);
+    end
+end
+sgtitle('Variable kernel PSTH for each channel (shared y-axis)', 'FontWeight','bold');
