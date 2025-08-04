@@ -1,0 +1,272 @@
+%% BATCH ANALYSIS OF KERNEL DENSITY ESTIMATION FOR PSTH
+% This script loops through all channels in a recording, generates a
+% Peri-Stimulus Time Histogram (PSTH), and applies locally-adaptive kernel
+% density estimation using the original ssvkernel.m.
+%
+% For each channel with spikes, it:
+% 1. Creates and saves a plot showing the raster, PSTH, and metrics.
+% 2. Calculates AUC, peak firing rate, and half-max decay time.
+% 3. Saves these metrics into a single aggregate struct.
+%
+% Channels with no spikes are automatically skipped.
+
+clear; clc;
+
+%% --- USER PARAMETERS ---
+% --- Input files ---
+spikeFile = 'OWT220207_1I_DIV63_HUB63_6UA_Cspikes_L0_RP2.mat_Nortefact.mat';
+rawFile   = 'OWT220207_1I_DIV63_HUB63_6UA.mat';
+
+% --- Recording parameters ---
+fs = 25000; % sample rate (Hz)
+spikeMethod = 'bior1p5'; % adjust as needed, should match field in spikeFile
+numChannels = 60; % adjust as needed
+artifact_window_ms = [0, 2]; % window around stim (in ms) to use for artifact removal
+
+% --- Analysis parameters ---
+psth_window_s = [0, 0.05]; % PSTH time window around stimulation events in seconds [start, end]
+psth_bin_width_s = 0.001; % Bin width for histogram in seconds
+
+%% --- CHANGE 5: CHANNEL REMAPPING LOGIC ---
+% Electrode/channel mapping from file index to desired channel ID.
+indices = [24 26 29 32 35 37, ...
+           21 22 25 30 31 36 39 40, ...
+           19 20 23 28 33 38 41 42, ...
+           16 17 18 27 34 43 44 45, ...
+           15 14 13 4 57 48 47 46, ...
+           12 11 8 3 58 53 50 49, ...
+           10 9 6 1 60 55 52 51, ...
+           7 5 2 59 56 54];
+
+ids = [21 31 41 51 61 71, ...
+       12 22 32 42 52 62 72 82, ...
+       13 23 33 43 53 63 73 83, ...
+       14 24 34 44 54 64 74 84, ...
+       15 25 35 45 55 65 75 85, ...
+       16 26 36 46 56 66 76 86, ...
+       17 27 37 47 57 67 77 87, ...
+       28 38 48 58 68 78];
+% Create a map for easy lookup: map(file_index) = new_id
+channelMap = containers.Map('KeyType','double','ValueType','double');
+for i = 1:numel(indices)
+    channelMap(indices(i)) = ids(i);
+end
+% --- END OF CHANGE 5 ---
+
+%% --- SETUP: CREATE OUTPUT DIRECTORY ---
+timestamp = datestr(now, 'ddmmmyyyy(HH:MM)');
+outputDir = ['PSTHanalysis(' timestamp ')'];
+if ~exist(outputDir, 'dir')
+    mkdir(outputDir);
+end
+fprintf('Saving analysis plots to folder: %s\n', outputDir);
+
+%% --- STEP 1: LOAD DATA AND FIND STIMULATION EVENTS (RUN ONCE) ---
+fprintf('Loading and processing data...\n');
+
+S = load(spikeFile);
+if isfield(S, 'spikeTimes')
+    spikeTimesConverted = S.spikeTimes;
+elseif isfield(S, 'spikes')
+    fprintf('Converting ''spikes'' matrix to standard format...\n');
+    [row, col] = find(S.spikes);
+    spikeTimesConverted = cell(1, numChannels);
+    for ch = 1:numChannels
+        spike_samples = row(col == ch);
+        spike_sec = spike_samples / fs;
+        spikeTimesConverted{ch} = struct(spikeMethod, spike_sec);
+    end
+else
+    error('Neither ''spikeTimes'' nor ''spikes'' found in %s.', spikeFile);
+end
+
+R = load(rawFile);
+if isfield(R, 'dat')
+    dat = double(R.dat);
+else
+    error('Raw data variable "dat" not found in %s', rawFile);
+end
+
+[num_samples, ~] = size(dat);
+stimThreshold = -1000;
+min_interval_ms = 2500;
+flat_search_window_ms = 100;
+flat_window_ms = 1.5;
+flat_thresh = 0.05;
+flat_window_samples = round(flat_window_ms * fs / 1000);
+flat_search_samples = round(flat_search_window_ms * fs / 1000);
+
+stim_times_sec = [];
+for channel_idx = 1:numChannels
+    trace = dat(:, channel_idx);
+    idx = find(trace > stimThreshold);
+    if isempty(idx), continue, end
+    idx = idx(:);
+    keep = [true; diff(idx) > round(0.010 * fs)];
+    idx = idx(keep);
+    for i = 1:length(idx)
+        center_idx = idx(i);
+        win_start = max(1, center_idx - flat_search_samples);
+        win_end = min(num_samples, center_idx + flat_search_samples);
+        win_trace = trace(win_start:win_end);
+        abs_diff = [0; abs(diff(win_trace))];
+        mov_abs_diff = movmean(abs_diff, flat_window_samples);
+        flat_idx = find(mov_abs_diff < flat_thresh);
+        if ~isempty(flat_idx)
+            flat_onsets = flat_idx([true; diff(flat_idx) > 1]);
+            flat_onsets_adj = flat_onsets - floor(flat_window_samples/2);
+            flat_onsets_adj(flat_onsets_adj < 1) = 1;
+            if ~isempty(flat_onsets_adj)
+                keep_idx = [true; diff(flat_onsets_adj) > round(min_interval_ms * fs / 1000)];
+                flat_onsets_adj = flat_onsets_adj(keep_idx);
+            end
+            for j = 1:length(flat_onsets_adj)
+                stim_idx = win_start - 1 + flat_onsets_adj(j);
+                stim_times_sec = [stim_times_sec; stim_idx / fs];
+            end
+        end
+    end
+end
+stimTimes = sort(unique(stim_times_sec(:)));
+fprintf('Found %d stimulation events.\n', length(stimTimes));
+
+%% --- STEP 2: LOOP THROUGH CHANNELS FOR ANALYSIS ---
+networkResponse = [];
+valid_channel_count = 0;
+
+% Loop through the original file indices (1-60)
+for file_idx = 1:numChannels
+    % Use the map to get the new channel ID for this file index
+    if ~isKey(channelMap, file_idx)
+        continue; % Skip if this file index is not in our map
+    end
+    channel_id = channelMap(file_idx);
+    
+    fprintf('\n--- Processing File Index %d (Channel ID %d) ---\n', file_idx, channel_id);
+
+    if file_idx > numChannels || file_idx < 1 || isempty(spikeTimesConverted{file_idx}) || ~isfield(spikeTimesConverted{file_idx}, spikeMethod)
+        spikeTimes = [];
+    else
+        spikeTimes_sec = spikeTimesConverted{file_idx}.(spikeMethod);
+        for stimIdx = 1:numel(stimTimes)
+            stimTime = stimTimes(stimIdx);
+            spikeTimes_sec = spikeTimes_sec(spikeTimes_sec < (stimTime + artifact_window_ms(1)/1000) | spikeTimes_sec >= (stimTime + artifact_window_ms(2)/1000));
+        end
+        spikeTimes = sort(spikeTimes_sec(:));
+    end
+
+    if isempty(spikeTimes)
+        fprintf('No spikes found for Channel ID %d after cleaning. Skipping.\n', channel_id);
+        continue;
+    end
+
+    out = WithinRanges(spikeTimes, stimTimes + psth_window_s, (1:length(stimTimes))', 'matrix');
+    spikeTimes_byEvent = arrayfun(@(n) spikeTimes(logical(out(:,n))) - stimTimes(n), 1:length(stimTimes), 'uni', 0)';
+    psth_samples = cell2mat(spikeTimes_byEvent);
+
+    if isempty(psth_samples)
+        fprintf('No spikes found within the PSTH window for Channel ID %d. Skipping.\n', channel_id);
+        continue;
+    end
+    
+    fprintf('Processing %d spikes from Channel ID %d.\n', length(psth_samples), channel_id);
+
+    fig = figure('Position',[100 100 800 900], 'Visible', 'off');
+    psth_window_ms = psth_window_s * 1000; % Convert window to ms for plotting
+
+    ax_raster = subplot(4,1,1);
+    hold on;
+    for trial_idx = 1:length(spikeTimes_byEvent)
+        trial_spikes_s = spikeTimes_byEvent{trial_idx};
+        if ~isempty(trial_spikes_s)
+            plot(trial_spikes_s * 1000, trial_idx * ones(size(trial_spikes_s)), 'r.', 'MarkerSize', 3);
+        end
+    end
+    hold off;
+    set(gca, 'YDir', 'reverse'); 
+    xlim(psth_window_ms);
+    ylim([0 length(spikeTimes_byEvent)+1]);
+    ylabel('Trial Number');
+    title(['Raster and PSTH for Channel ' num2str(channel_id)]);
+    set(gca, 'XTickLabel', []); 
+
+    ax_psth = subplot(4,1,2:3); hold on;
+    edges_s = psth_window_s(1):psth_bin_width_s:psth_window_s(2);
+    b = histc(psth_samples, edges_s);
+    total_spikes = length(psth_samples);
+    num_trials = length(stimTimes);
+    bar(edges_s * 1000, b / (num_trials * psth_bin_width_s), 1, 'HandleVisibility','off');
+    h = findobj(gca,'Type','patch');
+    set(h,'FaceColor',.7*[1 1 1],'EdgeColor',0.8*[1 1 1]);
+    set(gca,'XTickLabel',[]);
+
+    L = 1000;
+    t_s = linspace(psth_window_s(1), psth_window_s(2), L);
+    [yv_pdf, tv_s, optw_variable_s] = ssvkernel(psth_samples, t_s);
+    avg_spikes_per_trial = total_spikes / num_trials;
+    yv = yv_pdf * avg_spikes_per_trial;
+    
+    plot(tv_s * 1000, yv, 'r-', 'LineWidth', 2);
+
+    auc = trapz(tv_s, yv);
+    [max_fr, max_idx] = max(yv);
+    max_time_s = tv_s(max_idx);
+    half_max_fr = max_fr / 2;
+    decay_indices = find(yv(max_idx:end) <= half_max_fr, 1, 'first');
+    if ~isempty(decay_indices)
+        half_max_idx = max_idx + decay_indices - 1;
+        half_max_time_s = tv_s(half_max_idx);
+    else
+        half_max_time_s = NaN;
+    end
+    
+    plot(max_time_s * 1000, max_fr, 'ko', 'MarkerFaceColor', 'k', 'MarkerSize', 8, 'HandleVisibility','off');
+    text(max_time_s * 1000, max_fr, sprintf(' R_{max}: %.2f', max_fr), 'VerticalAlignment', 'bottom', 'FontSize', 9);
+    if ~isnan(half_max_time_s)
+        plot(half_max_time_s * 1000, half_max_fr, 'ks', 'MarkerFaceColor', 'k', 'MarkerSize', 8, 'HandleVisibility','off');
+        text(half_max_time_s * 1000, half_max_fr, sprintf(' Half-max decay at %.1fms', half_max_time_s*1000), 'VerticalAlignment', 'top', 'FontSize', 9);
+    end
+    plot_ylim = get(gca, 'YLim');
+    text(psth_window_ms(1) + 0.02*range(psth_window_ms), plot_ylim(2)*0.9, sprintf('AUC: %.3f', auc), 'FontSize', 10, 'FontWeight', 'bold');
+
+    set(gca,'XLim', psth_window_ms);
+    ylabel('Firing Rate (spikes/s)');
+    lgd1 = legend('PSTH', 'Location', 'Best'); % CHANGE 3
+    lgd1.Box = 'off';
+    grid on;
+    set(gca, 'XTickLabel', []);
+
+    ax_bw = subplot(4,1,4); hold on;
+    plot(tv_s * 1000, optw_variable_s * 1000, 'r', 'LineWidth', 2); % CHANGE 1
+    set(gca,'XLim', psth_window_ms);
+    ylabel('Bandwidth (ms)'); % CHANGE 1
+    xlabel('Time from stimulus (ms)'); % CHANGE 1
+    grid on;
+    % CHANGE 4: Removed legend from bandwidth plot
+    
+    linkaxes([ax_raster, ax_psth, ax_bw], 'x');
+
+    plot_filename = fullfile(outputDir, sprintf('PSTHanalysis%d.png', channel_id));
+    saveas(fig, plot_filename);
+    fprintf('Saved plot to %s\n', plot_filename);
+    close(fig);
+
+    valid_channel_count = valid_channel_count + 1;
+    networkResponse(valid_channel_count).channel_id = channel_id;
+    networkResponse(valid_channel_count).file_index = file_idx;
+    networkResponse(valid_channel_count).auc = auc;
+    networkResponse(valid_channel_count).peak_firing_rate_s = max_fr;
+    networkResponse(valid_channel_count).peak_time_ms = max_time_s * 1000;
+    networkResponse(valid_channel_count).decay_time_to_half_max_ms = half_max_time_s * 1000;
+end
+
+%% --- STEP 3: SAVE AGGREGATE RESULTS ---
+if ~isempty(networkResponse)
+    output_filename = sprintf('networkResponse_all_channels_%s.mat', timestamp);
+    save(output_filename, 'networkResponse');
+    fprintf('\nSaved aggregate network response metrics for %d channels to %s\n', valid_channel_count, output_filename);
+else
+    fprintf('\nNo valid channels with spikes were found to save.\n');
+end
+
+fprintf('Script finished.\n');
