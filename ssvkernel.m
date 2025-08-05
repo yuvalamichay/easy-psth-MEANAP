@@ -96,7 +96,7 @@ function [y,t,optw,gs,C,confb95,yb] = ssvkernel(x,tin)
 % Parameters Settings
 M = 80;            %Number of bandwidths examined for optimization.
 
-WinFunc = 'Boxcar'; %Window function ('Boxcar', 'Gauss','Laplace','Cauchy') 
+WinFunc = 'Gauss'; %Window function ('Boxcar', 'Gauss','Laplace','Cauchy') 
 
 nbs = 1*1e2;        %number of bootstrap samples
 
@@ -435,6 +435,5 @@ y(idx) = log(exp(x(idx))-1);
 
 idx = x>=1e2; 
 y(idx) = x(idx);
-
 
 
