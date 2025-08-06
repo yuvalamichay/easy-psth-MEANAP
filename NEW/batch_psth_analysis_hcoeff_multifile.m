@@ -33,9 +33,10 @@ filePairs = { ...
 fs = 25000;
 spikeMethod = 'bior1p5';
 numChannels = 60;
-artifact_window_ms = [0, 2];
 psth_window_s = [0, 0.02];      % Analysis window (e.g., 0 to 20ms post-stimulus)
 psth_bin_width_s = 0.001;
+min_blanking_duration_ms = 4;   % Post-stimulus blanking duration (ms)
+refractory_period_ms = 2000;       % Refractory period for spike detection (ms)
 
 % --- Stimulation detection parameters ---
 stimThreshold = -1000;          % Voltage threshold for initial spike detection
@@ -63,12 +64,14 @@ for k = 1:numel(filePairs)
     fprintf('  Raw File: %s\n', rawFile);
     fprintf('============================================================\n');
 
-    % --- Generate a unique output directory for this file pair ---
+    % --- Setup for the current file pair ---
     [~, baseName, ~] = fileparts(spikeFile);
     timestamp = datestr(now, 'ddmmmyyyy_HHMMSS');
     outputDir = sprintf('PSTH_HCoeff_Analysis_%s_%s', baseName, timestamp);
     if ~exist(outputDir, 'dir'), mkdir(outputDir); end
     fprintf('Saving analysis plots to folder: %s\n', outputDir);
+    
+    artifact_window_s = [0, min_blanking_duration_ms / 1000]; % Convert to seconds
 
     % --- LOAD DATA & FIND STIMS ---
     fprintf('Loading and processing data...\n');
@@ -96,10 +99,18 @@ for k = 1:numel(filePairs)
         if file_idx > numChannels || file_idx < 1 || isempty(spikeTimesConverted{file_idx}) || ~isfield(spikeTimesConverted{file_idx}, spikeMethod), all_spike_times_s = [];
         else, all_spike_times_s = spikeTimesConverted{file_idx}.(spikeMethod); end
         if isempty(all_spike_times_s), fprintf('No spikes found. Skipping.\n'); continue; end
+        
+        % --- Apply refractory period ---
+        if ~isempty(all_spike_times_s)
+            isis = diff(all_spike_times_s);
+            all_spike_times_s = all_spike_times_s([true; isis >= (refractory_period_ms / 1000)]);
+        end
 
+        % --- Blank spikes around stimulation artifacts ---
         spikeTimes_cleaned_s = all_spike_times_s;
-        for stimIdx = 1:numel(stimTimes), stimTime = stimTimes(stimIdx);
-            spikeTimes_cleaned_s = spikeTimes_cleaned_s(spikeTimes_cleaned_s < (stimTime + artifact_window_ms(1)/1000) | spikeTimes_cleaned_s >= (stimTime + artifact_window_ms(2)/1000));
+        for stimIdx = 1:numel(stimTimes)
+            stimTime = stimTimes(stimIdx);
+            spikeTimes_cleaned_s = spikeTimes_cleaned_s(spikeTimes_cleaned_s < (stimTime + artifact_window_s(1)) | spikeTimes_cleaned_s >= (stimTime + artifact_window_s(2)));
         end
         spikeTimes_cleaned_s = sort(spikeTimes_cleaned_s(:));
 
