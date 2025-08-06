@@ -37,6 +37,13 @@ artifact_window_ms = [0, 2];
 psth_window_s = [0, 0.02];      % Analysis window (e.g., 0 to 20ms post-stimulus)
 psth_bin_width_s = 0.001;
 
+% --- Stimulation detection parameters ---
+stimThreshold = -1000;          % Voltage threshold for initial spike detection
+min_interval_ms = 2500;         % Minimum time between consecutive stimulations (ms)
+flat_search_window_ms = 100;    % Window to search for the flat artifact region (ms)
+flat_window_ms = 1.5;           % Moving average window to identify the flat region (ms)
+flat_thresh = 0.05;             % Threshold for the moving average of the trace's derivative
+
 % --- Channel Remapping (assumes this is consistent across files) ---
 indices = [24 26 29 32 35 37, 21 22 25 30 31 36 39 40, 19 20 23 28 33 38 41 42, 16 17 18 27 34 43 44 45, 15 14 13 4 57 48 47 46, 12 11 8 3 58 53 50 49, 10 9 6 1 60 55 52 51, 7 5 2 59 56 54];
 ids = [21 31 41 51 61 71, 12 22 32 42 52 62 72 82, 13 23 33 43 53 63 73 83, 14 24 34 44 54 64 74 84, 15 25 35 45 55 65 75 85, 16 26 36 46 56 66 76 86, 17 27 37 47 57 67 77 87, 28 38 48 58 68 78];
@@ -58,7 +65,7 @@ for k = 1:numel(filePairs)
 
     % --- Generate a unique output directory for this file pair ---
     [~, baseName, ~] = fileparts(spikeFile);
-    timestamp = datestr(now, 'ddmmmyyyy_HH:MM');
+    timestamp = datestr(now, 'ddmmmyyyy_HHMMSS');
     outputDir = sprintf('PSTH_HCoeff_Analysis_%s_%s', baseName, timestamp);
     if ~exist(outputDir, 'dir'), mkdir(outputDir); end
     fprintf('Saving analysis plots to folder: %s\n', outputDir);
@@ -71,22 +78,11 @@ for k = 1:numel(filePairs)
         [row, col] = find(S.spikes); spikeTimesConverted = cell(1, numChannels);
         for ch = 1:numChannels, spike_samples = row(col == ch); spike_sec = spike_samples / fs; spikeTimesConverted{ch} = struct(spikeMethod, spike_sec); end
     else, error('Spike data not found in file: %s', spikeFile); end
-
-    R = load(rawFile);
-    if isfield(R, 'dat'), dat = double(R.dat); else, error('Raw data not found in file: %s', rawFile); end
-
-    [num_samples, ~] = size(dat); stimThreshold = -1000; min_interval_ms = 2500; flat_search_window_ms = 100; flat_window_ms = 1.5; flat_thresh = 0.05;
-    flat_window_samples = round(flat_window_ms * fs / 1000); flat_search_samples = round(flat_search_window_ms * fs / 1000); stim_times_sec = [];
-    for channel_idx = 1:numChannels, trace = dat(:, channel_idx); idx = find(trace > stimThreshold); if isempty(idx), continue, end; idx = idx(:);
-        keep = [true; diff(idx) > round(0.010 * fs)]; idx = idx(keep);
-        for i = 1:length(idx), center_idx = idx(i); win_start = max(1, center_idx - flat_search_samples); win_end = min(num_samples, center_idx + flat_search_samples);
-            win_trace = trace(win_start:win_end); abs_diff = [0; abs(diff(win_trace))]; mov_abs_diff = movmean(abs_diff, flat_window_samples);
-            flat_idx = find(mov_abs_diff < flat_thresh);
-            if ~isempty(flat_idx), flat_onsets = flat_idx([true; diff(flat_idx) > 1]); flat_onsets_adj = flat_onsets - floor(flat_window_samples/2); flat_onsets_adj(flat_onsets_adj < 1) = 1;
-                if ~isempty(flat_onsets_adj), keep_idx = [true; diff(flat_onsets_adj) > round(min_interval_ms * fs / 1000)]; flat_onsets_adj = flat_onsets_adj(keep_idx); end
-                for j = 1:length(flat_onsets_adj), stim_idx = win_start - 1 + flat_onsets_adj(j); stim_times_sec = [stim_times_sec; stim_idx / fs]; end
-            end; end; end
-    stimTimes = sort(unique(stim_times_sec(:)));
+    
+    % Use the detect_stim_times function to find stimulation events
+    fprintf('Detecting stimulation events...\n');
+    [stimTimes_ms, ~, ~] = detect_stim_times(rawFile, numChannels, fs, stimThreshold, flat_window_ms, flat_thresh, min_interval_ms, flat_search_window_ms);
+    stimTimes = sort(unique(stimTimes_ms(:))) / 1000; % Convert to seconds and ensure uniqueness
     fprintf('Found %d stimulation events.\n', length(stimTimes));
 
     % --- LOOP THROUGH CHANNELS FOR ANALYSIS ---
@@ -173,7 +169,7 @@ for k = 1:numel(filePairs)
         p2_diag = plot(NaN,NaN,'Color',[0.8 0.8 0.8],'LineWidth',2); % Dummy for legend
         p_mfr = yline(mfr, 'k:', 'LineWidth', 1.5);
         text(psth_window_ms(1), mfr, sprintf(' MFR: %.2f Hz', mfr), 'VerticalAlignment', 'bottom', 'HorizontalAlignment', 'left', 'Color', 'k', 'FontWeight','bold');
-        hold off; title('H-Coefficient Diagnostic Plot'); ylabel('Firing Rate (spikes/s)'); xlabel('Time from stimulus (ms)'); legend([p1_diag, p2_diag, p_mfr], 'Response', 'Shuffled Baselines', 'Mean Firing Rate', 'Location', 'Best'); grid on;
+        hold off; title('H-Coefficient Diagnostic Plot'); ylabel('Firing Rate (spikes/s)'); xlabel('Time from stimulus (ms)'); legend([p1_diag, p2_diag, p_mfr], 'Response', 'Shuffled Baselines', 'Mean Firing Rate', 'Location', 'northeast'); grid on;
 
         ax3 = subplot(2,2,3); hold on;
         edges_s = psth_window_s(1):psth_bin_width_s:psth_window_s(2);
